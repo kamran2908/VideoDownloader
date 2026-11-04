@@ -1,0 +1,8 @@
+build/
+dist/
+bin/
+installer/output/
+__pycache__/
+*.spec
+ffmpeg.zip
+ffmpeg_tmp/

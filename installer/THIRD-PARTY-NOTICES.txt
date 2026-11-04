@@ -1,0 +1,17 @@
+Video Downloader bundles the following third-party software.
+
+yt-dlp
+  License: The Unlicense (public domain dedication)
+  Project: https://github.com/yt-dlp/yt-dlp
+
+FFmpeg (LGPL build, unmodified)
+  License: GNU Lesser General Public License v2.1 or later
+  Project: https://ffmpeg.org
+  Build used: https://github.com/BtbN/FFmpeg-Builds
+  FFmpeg source code is available from the links above. ffmpeg.exe and
+  ffprobe.exe are separate programs inside the "bin" folder and can be
+  replaced with your own copies.
+
+Python and Tkinter (via PyInstaller)
+  License: Python Software Foundation License
+  Project: https://www.python.org

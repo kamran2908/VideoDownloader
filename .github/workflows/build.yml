@@ -1,0 +1,81 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number, e.g. 1.0.0"
+        required: true
+        default: "1.0.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Work out the version number
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $v = "${{ github.event.inputs.version }}"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Download yt-dlp and FFmpeg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          Invoke-WebRequest "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "bin\yt-dlp.exe"
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip" -OutFile "ffmpeg.zip"
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_tmp
+          Get-ChildItem ffmpeg_tmp -Recurse -Include ffmpeg.exe,ffprobe.exe | Copy-Item -Destination bin
+          Get-ChildItem bin
+
+      - name: Build the app
+        run: pyinstaller --noconfirm --onedir --windowed --name VideoDownloader --icon app\icon.ico --add-data "app\icon.ico;." app\video_downloader.py
+
+      - name: Add yt-dlp and FFmpeg next to the app
+        shell: pwsh
+        run: Copy-Item bin dist\VideoDownloader\bin -Recurse
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" installer\installer.iss
+
+      - name: Make a portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\VideoDownloader\* -DestinationPath VideoDownloader-Portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoDownloader
+          path: |
+            installer/output/VideoDownloader-Setup.exe
+            VideoDownloader-Portable.zip
+
+      - name: Publish a release (only when you push a version tag)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/output/VideoDownloader-Setup.exe
+            VideoDownloader-Portable.zip
