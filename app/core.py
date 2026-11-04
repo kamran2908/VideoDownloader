@@ -12,6 +12,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import urllib.request
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -114,6 +117,40 @@ def save_settings(settings: dict) -> None:
         pass
 
 
+# ------------------------------------------------------------------ download history
+
+HISTORY_LIMIT = 300
+_history_lock = threading.Lock()
+
+
+def load_history() -> list:
+    try:
+        data = json.loads((data_dir() / "history.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _write_history(entries: list) -> None:
+    try:
+        (data_dir() / "history.json").write_text(
+            json.dumps(entries[:HISTORY_LIMIT], indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def add_history(entry: dict) -> None:
+    with _history_lock:
+        entries = load_history()
+        entries.insert(0, entry)
+        _write_history(entries)
+
+
+def clear_history() -> None:
+    with _history_lock:
+        _write_history([])
+
+
 # ------------------------------------------------------------------ helpers
 
 def detect_platform(url: str) -> str:
@@ -165,6 +202,69 @@ def friendly_error(raw: str) -> str:
     if "ffmpeg" in t or "ffprobe" in t:
         return "A required component (ffmpeg) is missing or failed. Reinstall the app."
     return raw
+
+
+# ------------------------------------------------------------------ link preview
+
+def fetch_info(url: str, browser: str = "") -> dict:
+    """
+    Look up a link without downloading it. Returns a dict with
+    title / uploader / duration / thumbnail / is_playlist / count,
+    or {"error": "plain-language message"}.
+    """
+    base = ytdlp_command()
+    if not base:
+        return {"error": "The downloader engine was not found."}
+
+    args = ["--dump-single-json", "--no-warnings", "--skip-download",
+            "--no-playlist", "--flat-playlist"]
+    if browser and browser != "None":
+        args += ["--cookies-from-browser", browser]
+    args.append(url)
+
+    try:
+        out = subprocess.run(base + args, capture_output=True, text=True, timeout=60,
+                             creationflags=NO_WINDOW, env=_env(), stdin=subprocess.DEVNULL,
+                             encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return {"error": "Looking up this link took too long."}
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"error": f"Could not start the downloader: {e}"}
+
+    if out.returncode != 0:
+        errs = [ln for ln in out.stderr.splitlines() if ln.startswith("ERROR")]
+        raw = errs[-1][6:].strip() if errs else "Could not read this link."
+        return {"error": friendly_error(raw)}
+
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        return {"error": "Could not read the video details."}
+
+    thumb = data.get("thumbnail")
+    if not thumb and data.get("thumbnails"):
+        thumb = data["thumbnails"][-1].get("url")
+    entries = data.get("entries") or []
+    return {
+        "title": data.get("title") or url,
+        "uploader": data.get("uploader") or data.get("channel") or "",
+        "duration": data.get("duration_string") or "",
+        "thumbnail": thumb or "",
+        "is_playlist": data.get("_type") == "playlist",
+        "count": len(entries),
+    }
+
+
+def fetch_thumbnail(url: str):
+    """Download a thumbnail image. Returns bytes, or None if it fails."""
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read(3_000_000)
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------ command building
@@ -269,6 +369,29 @@ def update_ytdlp() -> str:
         return f"Update check failed: {e}"
 
 
+def _move_out_of_temp(files, tmp_dir: Path, final_folder: Path) -> list:
+    """Move finished files from the temp folder into the real folder (never overwriting)."""
+    moved = []
+    for f in files:
+        src = Path(f)
+        try:
+            rel = src.relative_to(tmp_dir)
+        except ValueError:
+            rel = Path(src.name)
+        dest = final_folder / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while dest.exists():
+            dest = dest.with_name(f"{rel.stem} ({n}){rel.suffix}")
+            n += 1
+        try:
+            shutil.move(str(src), str(dest))
+            moved.append(str(dest))
+        except OSError:
+            moved.append(str(src))
+    return moved
+
+
 class Result:
     def __init__(self):
         self.ok = False
@@ -291,12 +414,24 @@ class Job:
 
     def run(self, url, opts, on_progress=None, on_status=None) -> Result:
         res = Result()
+        if self.cancelled:
+            res.cancelled = True
+            return res
         base = ytdlp_command()
         if not base:
             res.error = "The downloader engine (yt-dlp) was not found. Please reinstall the app."
             return res
 
-        args = build_args(url, ffmpeg_location=ffmpeg_dir(), **opts)
+        # Audio extraction deletes its source file afterwards. Work inside a private temp
+        # folder so a video you already saved with the same name can never be touched.
+        final_folder = Path(opts["folder"])
+        tmp_dir = None
+        run_opts = dict(opts)
+        if opts.get("quality", "").startswith("Audio"):
+            tmp_dir = final_folder / (".vd_tmp_" + uuid.uuid4().hex[:8])
+            run_opts["folder"] = str(tmp_dir)
+
+        args = build_args(url, ffmpeg_location=ffmpeg_dir(), **run_opts)
         errors = []
         try:
             self.proc = subprocess.Popen(
@@ -304,6 +439,7 @@ class Job:
                 stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
                 env=_env(), creationflags=NO_WINDOW,
             )
+            part, last_pct = 1, -1.0
             for raw in self.proc.stdout:
                 line = raw.strip()
                 if line.startswith("[PROG]"):
@@ -314,8 +450,12 @@ class Job:
                         pct = None
                     speed = parts[1].strip() if len(parts) > 1 else ""
                     eta = parts[2].strip() if len(parts) > 2 else ""
-                    if on_progress and pct is not None:
-                        on_progress(pct, speed, eta)
+                    if pct is not None:
+                        if pct + 30 < last_pct:      # progress restarted: next stream (e.g. audio)
+                            part += 1
+                        last_pct = pct
+                        if on_progress:
+                            on_progress(pct, speed, eta, part)
                 elif line.startswith("[POST]"):
                     if on_status:
                         on_status("Processing file...")
@@ -326,7 +466,14 @@ class Job:
             code = self.proc.wait()
         except OSError as e:
             res.error = f"Could not start the downloader: {e}"
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             return res
+
+        if tmp_dir:
+            if code == 0 and not self.cancelled:
+                res.files = _move_out_of_temp(res.files, tmp_dir, final_folder)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
         res.cancelled = self.cancelled
         res.ok = (code == 0) and not self.cancelled

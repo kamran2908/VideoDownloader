@@ -1,16 +1,17 @@
 # Video Downloader (for the person who builds and shares it)
 
-A simple Windows app: paste a link (YouTube, Twitter/X, many other sites), choose quality, press Download.
+A modern Windows app (built with CustomTkinter): paste a link (YouTube, Twitter/X, many other sites), see a preview, add it to a queue with a progress bar per video, and find it again in the History tab. Light, dark and system themes.
 People who use it install it with a normal Setup.exe. They do NOT need Python, ffmpeg or a terminal.
 
 ## What is inside
 
 | Path | What it is |
 |---|---|
-| `app/video_downloader.py` | The window (Tkinter) |
+| `app/video_downloader.py` | The window (CustomTkinter): preview, queue, history, theme |
 | `app/core.py` | The engine that runs yt-dlp, shows progress, handles errors |
 | `installer/installer.iss` | Recipe for the Setup.exe (Inno Setup) |
 | `.github/workflows/build.yml` | Makes GitHub build the Setup.exe for you, for free |
+| `requirements.txt` | Python packages needed to run or build it (`pip install -r requirements.txt`) |
 | `build_local.bat` | Alternative: build on your own Windows PC |
 | `app/icon.ico` | The app icon (replace it with your own .ico if you like) |
 | `USER-GUIDE.md` | Plain-language guide you can give to users |
@@ -23,12 +24,21 @@ People who use it install it with a normal Setup.exe. They do NOT need Python, f
 4. After a few minutes, open the finished run and download the **VideoDownloader** artifact. It holds `VideoDownloader-Setup.exe` and a portable zip.
 5. To publish a proper download page for other people: create a tag instead, for example `v1.0.0` (GitHub Desktop: *Repository > Create tag*, then push). The workflow then creates a **Release** with the files attached. Share that Releases link.
 
-To ship an update, change the code, push, and create a new tag such as `v1.0.1`.
+To ship an update, change the code, push, and create a new tag such as `v1.1.0` (use a higher number than before). People install the new Setup.exe over their old version; settings and history are kept.
 
 ## Way 2: build on your own PC
 
 Install Python (tick "Add Python to PATH") and optionally Inno Setup 6, then double-click `build_local.bat`.
 Without Inno Setup you still get a ready-to-run folder in `dist\VideoDownloader`.
+
+## Try it without building (for you, while developing)
+
+```
+pip install -r requirements.txt
+pip install yt-dlp
+python app\video_downloader.py
+```
+You also need ffmpeg on your PATH for HD merging and MP3 (`winget install ffmpeg`). The installed app has its own copy.
 
 ## How it works (so you can change it)
 
@@ -37,7 +47,9 @@ Without Inno Setup you still get a ready-to-run folder in `dist\VideoDownloader`
 - The app runs `yt-dlp.exe` and `ffmpeg.exe` from its `bin` folder.
 - On first start, `yt-dlp.exe` is copied to `%LOCALAPPDATA%\VideoDownloader\`. The app runs `yt-dlp -U` on every start,
   so users get fixes automatically when YouTube or X change. No new Setup.exe is needed for that.
-- Settings (folder, quality, browser) are saved in the same folder.
+- Settings, the download history (`history.json`) and the theme are saved in the same folder.
+- Pasting a link runs a quick lookup (`yt-dlp --dump-single-json`) to get the title and thumbnail.
+- Downloads run one at a time. MP3 downloads work in a private temp folder, so they can never delete a video you already saved.
 - The Setup.exe installs per user (no admin password needed).
 
 ## Things to know before sharing

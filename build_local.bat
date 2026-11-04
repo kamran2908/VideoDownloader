@@ -6,13 +6,13 @@ echo ===== Video Downloader - build on this PC =====
 where python >nul 2>nul
 if errorlevel 1 goto nopython
 
-python -m pip install --upgrade pip pyinstaller
+python -m pip install --upgrade pip pyinstaller customtkinter pillow
 if not exist bin mkdir bin
 
 if not exist bin\yt-dlp.exe powershell -NoProfile -Command "Invoke-WebRequest 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'bin\yt-dlp.exe'"
 if not exist bin\ffmpeg.exe powershell -NoProfile -Command "Invoke-WebRequest 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip' -OutFile 'ffmpeg.zip'; Expand-Archive -Force 'ffmpeg.zip' 'ffmpeg_tmp'; Get-ChildItem 'ffmpeg_tmp' -Recurse -Include ffmpeg.exe,ffprobe.exe | Copy-Item -Destination 'bin'; Remove-Item -Recurse -Force 'ffmpeg_tmp','ffmpeg.zip'"
 
-pyinstaller --noconfirm --onedir --windowed --name VideoDownloader --icon app\icon.ico --add-data "app\icon.ico;." app\video_downloader.py
+pyinstaller --noconfirm --onedir --windowed --name VideoDownloader --icon app\icon.ico --add-data "app\icon.ico;." --collect-all customtkinter app\video_downloader.py
 robocopy bin dist\VideoDownloader\bin /E >nul
 
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
