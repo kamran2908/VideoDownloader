@@ -36,7 +36,10 @@ Name: "{autoprograms}\Video Downloader"; Filename: "{app}\VideoDownloader.exe"
 Name: "{autodesktop}\Video Downloader"; Filename: "{app}\VideoDownloader.exe"; Tasks: desktopicon
 
 [Run]
+; normal install: offer to open the app at the end
 Filename: "{app}\VideoDownloader.exe"; Description: "Open Video Downloader"; Flags: nowait postinstall skipifsilent
+; in-app update (silent install): reopen the app automatically
+Filename: "{app}\VideoDownloader.exe"; Flags: nowait; Check: WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\VideoDownloader"

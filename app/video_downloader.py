@@ -12,6 +12,7 @@ import queue
 import subprocess
 import sys
 import threading
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -28,7 +29,7 @@ NOTICE_TEXT = (
     "You are responsible for how you use this app."
 )
 
-PREVIEW_SIZE = (304, 171)
+PREVIEW_SIZE = (288, 162)
 THUMB_SIZE = (112, 63)
 PAD = 12
 
@@ -86,7 +87,8 @@ class Item:
         self.platform = platform
         self.status = "Queued"
         self.pct = 0.0
-        self.text = "Waiting in queue"
+        self.wait_text = "Waiting in queue"
+        self.text = self.wait_text
         self.job = None
         self.files = []
         self.w = None                 # widgets, filled in when the card is built
@@ -103,8 +105,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("Video Downloader")
-        self.geometry("1060x800")
-        self.minsize(960, 740)
+        self.geometry(f"1060x{min(820, max(self.winfo_screenheight() - 90, 640))}")
+        self.minsize(960, 600)
         self.after(250, self._set_icon)
 
         self.msgs = queue.Queue()
@@ -121,9 +123,16 @@ class App(ctk.CTk):
         self._preview_ctk = None
         self._debounce = None
 
+        self.quality_options = {}        # dropdown text -> {key, label, fmt, size}
+        self.quality_menu = None
+        self.plan_url = ""               # the link the size list was made for
+        self.update_info = None
+        self.update_busy = False
+
         self.url_var = ctk.StringVar()
-        self.quality_var = ctk.StringVar(
-            value=settings.get("quality") if settings.get("quality") in core.QUALITIES else core.QUALITIES[0])
+        self.quality_var = ctk.StringVar()
+        saved_quality = settings.get("quality") if settings.get("quality") in core.QUALITIES else core.QUALITIES[0]
+        self._default_quality_options(saved_quality)
         self.platform_var = ctk.StringVar(value=core.PLATFORMS[0])
         self.folder_var = ctk.StringVar(value=settings.get("folder", str(Path.home() / "Downloads")))
         self.browser_var = ctk.StringVar(
@@ -131,7 +140,7 @@ class App(ctk.CTk):
         self.playlist_var = ctk.BooleanVar(value=False)
         self.theme_var = ctk.StringVar(value=theme)
         self.status_var = ctk.StringVar(value="Checking for updates...")
-        self.engine_var = ctk.StringVar(value="")
+        self.engine_var = ctk.StringVar(value=f"App {core.APP_VERSION}")
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -147,6 +156,7 @@ class App(ctk.CTk):
 
         self.url_var.trace_add("write", self._on_url_change)
         threading.Thread(target=self._startup_update, daemon=True).start()
+        threading.Thread(target=self._check_app_update, daemon=True).start()
         self._sync_empty()
         self.refresh_history()
         self._poll()
@@ -163,7 +173,7 @@ class App(ctk.CTk):
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
         # ---- header
         head = ctk.CTkFrame(self, fg_color="transparent")
@@ -176,10 +186,38 @@ class App(ctk.CTk):
         ctk.CTkSegmentedButton(head, values=["System", "Light", "Dark"], variable=self.theme_var,
                                command=self.change_theme, width=210).grid(row=0, column=1, rowspan=2, sticky="e")
 
+        # ---- update banner (hidden until a newer version is found)
+        self.banner = ctk.CTkFrame(self, corner_radius=8, fg_color=("#dbeafe", "#1e3a5f"))
+        self.banner.grid(row=1, column=0, columnspan=2, sticky="ew", padx=PAD + 4, pady=(10, 0))
+        self.banner.grid_columnconfigure(0, weight=1)
+        self.banner_label = ctk.CTkLabel(self.banner, text="", anchor="w",
+                                         font=ctk.CTkFont(size=14, weight="bold"))
+        self.banner_label.grid(row=0, column=0, sticky="w", padx=14, pady=(10, 0))
+        self.banner_sub = ctk.CTkLabel(self.banner, text="", anchor="w", text_color=("gray25", "gray75"))
+        self.banner_sub.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 10))
+        self.banner_bar = ctk.CTkProgressBar(self.banner)
+        self.banner_bar.set(0)
+        bb = ctk.CTkFrame(self.banner, fg_color="transparent")
+        bb.grid(row=0, column=1, rowspan=2, padx=10)
+        self.banner_now = ctk.CTkButton(bb, text="Update now", width=110, command=self.start_update)
+        self.banner_now.grid(row=0, column=0, padx=4)
+        self.banner_notes = ctk.CTkButton(bb, text="What's new", width=92, fg_color="transparent", border_width=1,
+                                          text_color=("gray10", "gray90"), command=self.open_release_page)
+        self.banner_notes.grid(row=0, column=1, padx=4)
+        self.banner_later = ctk.CTkButton(bb, text="Later", width=70, fg_color="transparent", border_width=1,
+                                          text_color=("gray10", "gray90"), command=self.hide_banner)
+        self.banner_later.grid(row=0, column=2, padx=4)
+        self.banner.grid_remove()
+
         # ---- left: new download card
-        left = ctk.CTkFrame(self, width=350)
-        left.grid(row=1, column=0, sticky="ns", padx=(PAD, PAD // 2), pady=PAD)
-        left.grid_propagate(False)
+        # the form scrolls if the window is short; the "Add to queue" button stays pinned at the bottom
+        left_outer = ctk.CTkFrame(self, width=372)
+        left_outer.grid(row=2, column=0, sticky="ns", padx=(PAD, PAD // 2), pady=PAD)
+        left_outer.grid_propagate(False)
+        left_outer.grid_columnconfigure(0, weight=1)
+        left_outer.grid_rowconfigure(0, weight=1)
+        left = ctk.CTkScrollableFrame(left_outer, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew")
         left.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(left, text="New download", font=ctk.CTkFont(size=16, weight="bold")).grid(
@@ -207,39 +245,40 @@ class App(ctk.CTk):
         self.preview_meta = ctk.CTkLabel(left, text="", anchor="w", text_color=("gray35", "gray65"))
         self.preview_meta.grid(row=4, column=0, sticky="ew", padx=14)
 
-        two = ctk.CTkFrame(left, fg_color="transparent")
-        two.grid(row=5, column=0, sticky="ew", padx=14, pady=(8, 0))
-        two.grid_columnconfigure((0, 1), weight=1)
-        ctk.CTkLabel(two, text="Quality", anchor="w", text_color=("gray35", "gray65")).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(two, text="Platform", anchor="w", text_color=("gray35", "gray65")).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ctk.CTkOptionMenu(two, variable=self.quality_var, values=core.QUALITIES).grid(row=1, column=0, sticky="ew")
-        ctk.CTkOptionMenu(two, variable=self.platform_var, values=core.PLATFORMS).grid(
-            row=1, column=1, sticky="ew", padx=(8, 0))
+        ctk.CTkLabel(left, text="Quality  (file size appears after the preview loads)", anchor="w",
+                     text_color=("gray35", "gray65")).grid(row=5, column=0, sticky="w", padx=14, pady=(8, 0))
+        self.quality_menu = ctk.CTkOptionMenu(left, variable=self.quality_var,
+                                              values=list(self.quality_options), dynamic_resizing=False)
+        self.quality_menu.grid(row=6, column=0, sticky="ew", padx=14)
 
         self.name_entry = ctk.CTkEntry(left, placeholder_text="File name (optional)")
-        self.name_entry.grid(row=6, column=0, sticky="ew", padx=14, pady=(10, 0))
+        self.name_entry.grid(row=7, column=0, sticky="ew", padx=14, pady=(10, 0))
 
         frow = ctk.CTkFrame(left, fg_color="transparent")
-        frow.grid(row=7, column=0, sticky="ew", padx=14, pady=(8, 0))
+        frow.grid(row=8, column=0, sticky="ew", padx=14, pady=(8, 0))
         frow.grid_columnconfigure(0, weight=1)
         ctk.CTkEntry(frow, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew")
         ctk.CTkButton(frow, text="Browse", width=64, command=self.browse).grid(row=0, column=1, padx=(8, 0))
 
         ctk.CTkCheckBox(left, text="Download the whole playlist", variable=self.playlist_var).grid(
-            row=8, column=0, sticky="w", padx=14, pady=(10, 0))
+            row=9, column=0, sticky="w", padx=14, pady=(10, 0))
 
-        ctk.CTkLabel(left, text="Browser login (only for sign-in or age-restricted videos)", anchor="w",
-                     text_color=("gray35", "gray65"), wraplength=310, justify="left").grid(
-            row=9, column=0, sticky="w", padx=14, pady=(8, 0))
-        ctk.CTkOptionMenu(left, variable=self.browser_var, values=core.BROWSERS).grid(
-            row=10, column=0, sticky="ew", padx=14)
+        two = ctk.CTkFrame(left, fg_color="transparent")
+        two.grid(row=10, column=0, sticky="ew", padx=14, pady=(8, 0))
+        two.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkLabel(two, text="Platform", anchor="w", text_color=("gray35", "gray65")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(two, text="Browser login (if asked)", anchor="w", text_color=("gray35", "gray65")).grid(
+            row=0, column=1, sticky="w", padx=(8, 0))
+        ctk.CTkOptionMenu(two, variable=self.platform_var, values=core.PLATFORMS).grid(row=1, column=0, sticky="ew")
+        ctk.CTkOptionMenu(two, variable=self.browser_var, values=core.BROWSERS).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0))
 
-        ctk.CTkButton(left, text="Add to queue", height=42, font=ctk.CTkFont(size=14, weight="bold"),
-                      command=self.add_to_queue).grid(row=11, column=0, sticky="ew", padx=14, pady=(14, 14))
+        ctk.CTkButton(left_outer, text="Add to queue", height=42, font=ctk.CTkFont(size=14, weight="bold"),
+                      command=self.add_to_queue).grid(row=1, column=0, sticky="ew", padx=14, pady=(8, 14))
 
         # ---- right: queue + history tabs
         self.tabs = ctk.CTkTabview(self, command=self._on_tab)
-        self.tabs.grid(row=1, column=1, sticky="nsew", padx=(PAD // 2, PAD), pady=PAD)
+        self.tabs.grid(row=2, column=1, sticky="nsew", padx=(PAD // 2, PAD), pady=PAD)
         qt = self.tabs.add("Queue")
         ht = self.tabs.add("History")
 
@@ -273,7 +312,7 @@ class App(ctk.CTk):
 
         # ---- footer
         foot = ctk.CTkFrame(self, fg_color="transparent")
-        foot.grid(row=2, column=0, columnspan=2, sticky="ew", padx=PAD + 4, pady=(0, PAD))
+        foot.grid(row=3, column=0, columnspan=2, sticky="ew", padx=PAD + 4, pady=(0, PAD))
         foot.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(foot, textvariable=self.status_var, anchor="w").grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(foot, textvariable=self.engine_var, text_color=("gray35", "gray65")).grid(
@@ -366,6 +405,33 @@ class App(ctk.CTk):
         settings["theme"] = mode
         core.save_settings(settings)
 
+    # ================================================================ quality list (with sizes)
+
+    def _apply_quality_options(self, options, select_key, show_sizes):
+        """Rebuild the quality dropdown. options: [{key, label, fmt, size}]."""
+        mapping = {}
+        for o in options:
+            text = o["label"] + (("   ·   " + core.format_size(o.get("size"))) if show_sizes else "")
+            mapping[text] = o
+        self.quality_options = mapping
+        labels = list(mapping)
+        pick = next((t for t, o in mapping.items() if o["key"] == select_key), labels[0])
+        self.quality_var.set(pick)
+        if self.quality_menu is not None:
+            self.quality_menu.configure(values=labels)
+
+    def current_quality(self):
+        return self.quality_options.get(self.quality_var.get()) or \
+            {"key": core.QUALITIES[0], "label": core.QUALITIES[0], "fmt": None, "size": None}
+
+    def _default_quality_options(self, select_key=None):
+        """The plain list (no sizes), used before a preview is available."""
+        if select_key is None:
+            select_key = self.current_quality()["key"]
+        options = [{"key": k, "label": core.quality_label(k), "fmt": None, "size": None} for k in core.QUALITIES]
+        self._apply_quality_options(options, select_key, False)
+        self.plan_url = ""
+
     # ================================================================ link preview
 
     def _on_url_change(self, *_):
@@ -384,6 +450,7 @@ class App(ctk.CTk):
         self._show_preview_image(None, "Preview appears here")
         self.preview_title.configure(text="")
         self.preview_meta.configure(text="")
+        self._default_quality_options()
 
     def _show_preview_image(self, pil, text=""):
         self._preview_ctk = self._ctk_image(pil or placeholder_image(PREVIEW_SIZE), PREVIEW_SIZE)
@@ -399,6 +466,7 @@ class App(ctk.CTk):
         self._show_preview_image(None, "Looking up this link...")
         self.preview_title.configure(text="")
         self.preview_meta.configure(text="")
+        self._default_quality_options()
         browser = self.browser_var.get()
 
         def work():
@@ -436,10 +504,16 @@ class App(ctk.CTk):
         if info.get("duration"):
             bits.append(info["duration"])
         self.preview_meta.configure(text=shorten("  ·  ".join(bits), 70))
+        if info.get("plans"):                       # real qualities + sizes for this video
+            self._apply_quality_options(info["plans"], self.current_quality()["key"], True)
+            self.plan_url = url
 
     # ================================================================ queue
 
     def add_to_queue(self):
+        if self.update_busy:
+            messagebox.showinfo("Updating", "The app is updating. Please wait a moment.")
+            return
         urls = core.extract_urls(self.url_var.get())
         if not urls:
             messagebox.showwarning("Link needed", "Please paste a link that starts with http:// or https://")
@@ -462,8 +536,10 @@ class App(ctk.CTk):
         if name and playlist:
             name = ""                                   # a single name can't apply to a playlist
 
-        opts = dict(folder=str(folder), name=name, quality=self.quality_var.get(),
-                    playlist=playlist, browser=self.browser_var.get())
+        q = self.current_quality()
+        use_plan = (self.plan_url == url) and not playlist     # sizes/streams belong to this exact link
+        opts = dict(folder=str(folder), name=name, quality=q["key"], playlist=playlist,
+                    browser=self.browser_var.get(), fmt=q["fmt"] if use_plan else None)
         settings = core.load_settings()
         settings.update({"folder": str(folder), "quality": opts["quality"], "browser": opts["browser"]})
         core.save_settings(settings)
@@ -471,8 +547,11 @@ class App(ctk.CTk):
         info = self.preview_info if (self.preview_url == url and self.preview_info
                                      and "error" not in self.preview_info) else None
         title = info["title"] if info else url
-        meta = " · ".join(b for b in (platform, opts["quality"]) if b)
+        size_text = core.format_size(q["size"]) if (use_plan and q.get("size")) else ""
+        meta = " · ".join(b for b in (q["label"], size_text) if b)
         item = Item(url, title, meta, self.preview_thumb if info else None, opts, platform)
+        item.wait_text = "Waiting in queue · " + meta
+        item.text = item.wait_text
         self.items.append(item)
         self._build_card(item)
         self._sync_empty()
@@ -539,7 +618,7 @@ class App(ctk.CTk):
                 reveal_file(Path(item.opts["folder"]) / "x")
         else:                                              # Failed / Cancelled -> try again
             with self.lock:
-                item.status, item.pct, item.text, item.error = "Queued", 0.0, "Waiting in queue", ""
+                item.status, item.pct, item.text = "Queued", 0.0, item.wait_text
             self._refresh_item(item)
             self._ensure_runner()
             self._update_summary()
@@ -703,6 +782,74 @@ class App(ctk.CTk):
             core.clear_history()
             self.refresh_history()
 
+    # ================================================================ app updates (new version of this app)
+
+    def _check_app_update(self):
+        info = core.check_for_update()
+        if info:
+            self.msgs.put(("update_found", info))
+
+    def _show_banner(self, info):
+        self.update_info = info
+        self.banner_label.configure(text=f"Version {info['version']} is available   (you have {core.APP_VERSION})")
+        self.banner_sub.configure(
+            text="Press “Update now”. The app downloads it, installs it and reopens by itself.",
+            text_color=("gray25", "gray75"))
+        self.banner_bar.grid_remove()
+        self.banner_now.configure(state="normal")
+        self.banner_later.configure(state="normal")
+        self.banner.grid()
+
+    def hide_banner(self):
+        if not self.update_busy:
+            self.banner.grid_remove()
+
+    def open_release_page(self):
+        if self.update_info and self.update_info.get("page"):
+            webbrowser.open(self.update_info["page"])
+
+    def start_update(self):
+        info = self.update_info
+        if not info or self.update_busy:
+            return
+        if any(i.status in ("Queued", "Downloading") for i in self.items):
+            messagebox.showinfo("Busy", "Please wait until the downloads finish, then update.")
+            return
+        self.update_busy = True
+        self.banner_now.configure(state="disabled")
+        self.banner_later.configure(state="disabled")
+        self.banner_sub.configure(text="Downloading the update...", text_color=("gray25", "gray75"))
+        self.banner_bar.set(0)
+        self.banner_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 12))
+
+        def work():
+            try:
+                path = core.download_update(
+                    info, on_progress=lambda done, total: self.msgs.put(("update_progress", done, total)))
+                self.msgs.put(("update_ready", path))
+            except Exception as e:
+                self.msgs.put(("update_error", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, message):
+        self.update_busy = False
+        self.banner_now.configure(state="normal", text="Try again")
+        self.banner_later.configure(state="normal")
+        self.banner_bar.grid_remove()
+        self.banner_sub.configure(text=shorten(message, 140), text_color=RED)
+
+    def _install_update(self, path):
+        self.banner_sub.configure(text="Installing... the app will close and reopen in a moment.")
+        self.banner_bar.set(1)
+        try:
+            core.launch_installer(path)
+        except Exception as e:
+            self._update_failed(str(e))
+            return
+        self.closing = True
+        self.after(700, self.destroy)
+
     # ================================================================ engine updates
 
     def _startup_update(self):
@@ -746,9 +893,20 @@ class App(ctk.CTk):
                         self.refresh_history()
                 elif kind == "preview":
                     self._apply_preview(*rest)
+                elif kind == "update_found":
+                    self._show_banner(rest[0])
+                elif kind == "update_progress":
+                    done, total = rest
+                    pct = (done / total) if total else 0
+                    self.banner_bar.set(min(pct, 1.0))
+                    self.banner_sub.configure(text=f"Downloading the update...  {pct * 100:.0f}%")
+                elif kind == "update_ready":
+                    self._install_update(rest[0])
+                elif kind == "update_error":
+                    self._update_failed(rest[0])
                 elif kind == "engine":
                     version, note = rest
-                    self.engine_var.set(f"yt-dlp {version}")
+                    self.engine_var.set(f"App {core.APP_VERSION}   ·   yt-dlp {version}")
                     self.update_btn.configure(state="normal")
                     self._update_summary()
                     if "up to date" not in note.lower() and self.status_var.get() == "Ready":

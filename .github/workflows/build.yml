@@ -35,6 +35,14 @@ jobs:
           }
           "version=$v" >> $env:GITHUB_OUTPUT
 
+      - name: Stamp the version and repository into the app
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          Set-Content -Path app\build_info.py -Value ('VERSION = "' + $v + '"') -Encoding ascii
+          Add-Content -Path app\build_info.py -Value ('REPO = "${{ github.repository }}"') -Encoding ascii
+          Get-Content app\build_info.py
+
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller customtkinter pillow
 
@@ -46,6 +54,9 @@ jobs:
           Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip" -OutFile "ffmpeg.zip"
           Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_tmp
           Get-ChildItem ffmpeg_tmp -Recurse -Include ffmpeg.exe,ffprobe.exe | Copy-Item -Destination bin
+          Invoke-WebRequest "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip" -OutFile "deno.zip"
+          Expand-Archive -Path deno.zip -DestinationPath deno_tmp
+          Copy-Item deno_tmp\deno.exe bin\deno.exe
           Get-ChildItem bin
 
       - name: Build the app
@@ -61,6 +72,12 @@ jobs:
           choco install innosetup -y --no-progress
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" installer\installer.iss
 
+      - name: Write the checksum the in-app updater verifies
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash installer\output\VideoDownloader-Setup.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path installer\output\VideoDownloader-Setup.exe.sha256 -Value "$h  VideoDownloader-Setup.exe" -Encoding ascii
+
       - name: Make a portable zip
         shell: pwsh
         run: Compress-Archive -Path dist\VideoDownloader\* -DestinationPath VideoDownloader-Portable.zip
@@ -70,6 +87,7 @@ jobs:
           name: VideoDownloader
           path: |
             installer/output/VideoDownloader-Setup.exe
+            installer/output/VideoDownloader-Setup.exe.sha256
             VideoDownloader-Portable.zip
 
       - name: Publish a release (only when you push a version tag)
@@ -78,4 +96,5 @@ jobs:
         with:
           files: |
             installer/output/VideoDownloader-Setup.exe
+            installer/output/VideoDownloader-Setup.exe.sha256
             VideoDownloader-Portable.zip

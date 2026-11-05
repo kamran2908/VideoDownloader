@@ -8,7 +8,8 @@ People who use it install it with a normal Setup.exe. They do NOT need Python, f
 | Path | What it is |
 |---|---|
 | `app/video_downloader.py` | The window (CustomTkinter): preview, queue, history, theme |
-| `app/core.py` | The engine that runs yt-dlp, shows progress, handles errors |
+| `app/core.py` | The engine: runs yt-dlp, picks the best streams, estimates sizes, checks for app updates |
+| `app/build_info.py` | Version + repository name. The GitHub build rewrites it automatically; the committed copy is only a placeholder |
 | `installer/installer.iss` | Recipe for the Setup.exe (Inno Setup) |
 | `.github/workflows/build.yml` | Makes GitHub build the Setup.exe for you, for free |
 | `requirements.txt` | Python packages needed to run or build it (`pip install -r requirements.txt`) |
@@ -40,6 +41,21 @@ python app\video_downloader.py
 ```
 You also need ffmpeg on your PATH for HD merging and MP3 (`winget install ffmpeg`). The installed app has its own copy.
 
+## In-app updates (like VS Code)
+
+When the app starts it asks GitHub for your newest **Release**. If its version is higher than the installed one,
+a banner appears: **Update now / What's new / Later**. "Update now" downloads `VideoDownloader-Setup.exe`,
+checks it against the published `.sha256` checksum, installs it quietly, and reopens the app.
+
+What it needs from you:
+- The repository must be **public** (the app asks GitHub without logging in).
+- Every release must be made by pushing a **tag with a higher number** (`v1.2.0`, then `v1.2.1`, ...).
+  The version inside the app comes from the tag, and the repository name from GitHub, automatically.
+- The release must contain `VideoDownloader-Setup.exe` and `VideoDownloader-Setup.exe.sha256` (the workflow does this).
+- Nothing is ever downloaded from anywhere except `github.com/<your repo>/releases/download/`.
+- Anyone who installed the old version (before in-app updates existed) must install this version by hand once;
+  from then on updates are one click.
+
 ## How it works (so you can change it)
 
 - The first time someone opens the app, a short "Before you start" notice appears. They must tick "I understand" to continue; the choice is saved in `settings.json`. The wording is `NOTICE_TEXT` at the top of `app/video_downloader.py`.
@@ -48,7 +64,10 @@ You also need ffmpeg on your PATH for HD merging and MP3 (`winget install ffmpeg
 - On first start, `yt-dlp.exe` is copied to `%LOCALAPPDATA%\VideoDownloader\`. The app runs `yt-dlp -U` on every start,
   so users get fixes automatically when YouTube or X change. No new Setup.exe is needed for that.
 - Settings, the download history (`history.json`) and the theme are saved in the same folder.
-- Pasting a link runs a quick lookup (`yt-dlp --dump-single-json`) to get the title and thumbnail.
+- Pasting a link runs a quick lookup (`yt-dlp --dump-single-json`) to get the title, thumbnail and every available quality.
+- The app chooses the exact video + audio streams itself: highest resolution, 60 fps preferred, HDR avoided (it looks washed out on normal screens), H.264 + AAC up to 1080p (plays everywhere), VP9 + Opus above that. Those same streams are what the size list shows, so the sizes match what gets downloaded.
+- Files are `.mp4` when the streams allow it, otherwise `.mkv` (for example 4K VP9/Opus). VLC plays both.
+- YouTube needs a JavaScript runtime for full quality. The installer bundles **Deno** in `bin\deno.exe` and yt-dlp is told where it is.
 - Downloads run one at a time. MP3 downloads work in a private temp folder, so they can never delete a video you already saved.
 - The Setup.exe installs per user (no admin password needed).
 

@@ -12,6 +12,15 @@ FFmpeg (LGPL build, unmodified)
   ffprobe.exe are separate programs inside the "bin" folder and can be
   replaced with your own copies.
 
+Deno (JavaScript runtime, unmodified)
+  License: MIT License
+  Project: https://deno.com
+  Used by yt-dlp to read YouTube pages so that all video qualities are available.
+
+CustomTkinter and Pillow
+  Licenses: MIT License (CustomTkinter), HPND License (Pillow)
+  Projects: https://github.com/TomSchimansky/CustomTkinter, https://python-pillow.org
+
 Python and Tkinter (via PyInstaller)
   License: Python Software Foundation License
   Project: https://www.python.org
