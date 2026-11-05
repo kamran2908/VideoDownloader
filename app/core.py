@@ -32,7 +32,8 @@ except ImportError:
 
 PLATFORMS = ["Auto-detect", "YouTube", "Twitter / X", "Other website"]
 QUALITIES = ["Best available", "2160p", "1440p", "1080p", "720p", "480p", "360p", "Audio only (MP3)"]
-BROWSERS = ["None", "chrome", "edge", "firefox", "brave"]
+COOKIES_FILE_LABEL = "cookies.txt file..."
+BROWSERS = ["None", "firefox", "edge", "chrome", "brave", COOKIES_FILE_LABEL]
 _NICE_QUALITY = {"2160p": "2160p (4K)", "1440p": "1440p (2K)"}
 MP3_KBPS = 192
 
@@ -198,34 +199,88 @@ def clean_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "", name).strip().rstrip(".")
 
 
+def error_kind(raw: str) -> str:
+    """Rough category of a yt-dlp error message."""
+    t = raw.lower()
+    if any(h in t for h in ("dpapi", "failed to decrypt", "could not copy", "cookie database")) or \
+            ("cookie" in t and any(h in t for h in ("decrypt", "database", "unsupported browser", "could not find"))):
+        return "cookies"
+    if "private video" in t or "private account" in t:
+        return "private"
+    if "drm" in t:
+        return "drm"
+    if "ffmpeg" in t or "ffprobe" in t or "postprocess" in t:
+        return "ffmpeg"
+    if any(h in t for h in ("not a bot", "sign in", "log in", "login", "authentication", "use --cookies",
+                            "nsfw", "age-restricted", "age restricted", "confirm your age",
+                            "age verification", "protected account", "protected tweet", "tweet is protected",
+                            "members-only", "members only")):
+        return "login"
+    if any(h in t for h in ("geo restrict", "geo-restrict", "geo bypass", "your country", "geographic")):
+        return "geo"
+    if "no video could be found" in t or "no video formats found" in t:
+        return "novideo"
+    if any(h in t for h in ("unavailable", "removed", "deleted", "does not exist", "404", "suspended",
+                            "not found")):
+        return "gone"
+    if "unsupported url" in t:
+        return "unsupported"
+    if "429" in t or "rate limit" in t or "too many requests" in t:
+        return "ratelimit"
+    if "403" in t or "forbidden" in t:
+        return "403"
+    if "requested format" in t:
+        return "format"
+    if "unable to download" in t or "getaddrinfo" in t or "timed out" in t or "connection" in t \
+            or "network is unreachable" in t:
+        return "network"
+    return "other"
+
+
+# Errors where trying a different way to download can help. The rest (login, private, removed...) can't be fixed by retrying.
+RETRYABLE_KINDS = {"403", "format", "ffmpeg", "other"}
+
+_MESSAGES = {
+    "cookies": ("Couldn't read your browser login. Close the browser and try again, or try Firefox. "
+                "You can also pick “cookies.txt file...” under Browser login."),
+    "login": ("This needs you to be signed in (for example an age-restricted or sensitive post). "
+              "Sign in to the site in Firefox, then choose Firefox under Browser login and press Retry. "
+              "Or choose “cookies.txt file...”."),
+    "private": "This video is private, so it can't be downloaded.",
+    "geo": "This video is blocked in your country.",
+    "novideo": ("No downloadable video was found at this link. If the video is inside a quoted post or a reply, "
+                "paste the link of that post itself. Some posts need a sign-in (see Browser login)."),
+    "gone": "This video isn't available. It may have been removed, made private, or the account is gone.",
+    "unsupported": "This link isn't supported. Make sure it's a link to a video page.",
+    "drm": "This video is protected (DRM) and can't be saved.",
+    "ratelimit": "The site is limiting requests right now. Wait a few minutes and try again.",
+    "403": "The site refused the download (error 403). Press “Update downloader” and try again.",
+    "format": "The site doesn't offer a format this app can save for this video.",
+    "network": "Couldn't reach the site. Check your internet connection and try again.",
+    "ffmpeg": "A required component (ffmpeg) failed. Try again, or reinstall the app.",
+}
+
+
 def friendly_error(raw: str) -> str:
     """Turn yt-dlp's technical errors into plain advice."""
-    t = raw.lower()
-    if "not a bot" in t or "sign in" in t or "log in" in t or "login" in t:
-        return ("This video needs you to be signed in. Sign in to the site in your browser, "
-                "then choose that browser under 'Use browser login' and try again.")
-    if "private video" in t:
-        return "This video is private, so it can't be downloaded."
-    if "age" in t and "restrict" in t:
-        return "This video is age-restricted. Choose your browser under 'Use browser login' and try again."
-    if ("unavailable" in t or "removed" in t or "does not exist" in t
-            or "no video could be found" in t or "404" in t):
-        return "This video isn't available (it may be removed, private, or blocked in your country)."
-    if "unsupported url" in t:
-        return "This link isn't supported. Make sure it's a link to a video page."
-    if "403" in t:
-        return "The site refused the download (error 403). Click 'Update downloader' and try again."
-    if "cookie" in t or "dpapi" in t or ("database" in t and "locked" in t):
-        return ("Couldn't read your browser login. Close the browser and try again, "
-                "or try a different browser.")
-    if "unable to download" in t or "getaddrinfo" in t or "timed out" in t or "connection" in t:
-        return "Couldn't reach the site. Check your internet connection and try again."
-    if "ffmpeg" in t or "ffprobe" in t:
-        return "A required component (ffmpeg) is missing or failed. Reinstall the app."
-    return raw
+    kind = error_kind(raw)
+    if kind in _MESSAGES:
+        return _MESSAGES[kind]
+    short = " ".join(raw.split())
+    short = re.sub(r";? ?please report this issue.*$", "", short, flags=re.I)
+    return "The download failed: " + (short[:200] + ("…" if len(short) > 200 else ""))
 
 
 # ------------------------------------------------------------------ link preview
+
+def _cookie_args(browser: str) -> list:
+    """'firefox' -> --cookies-from-browser firefox;  'file:C:\\x\\cookies.txt' -> --cookies <file>."""
+    if not browser or browser == "None":
+        return []
+    if browser.startswith("file:"):
+        return ["--cookies", browser[5:]]
+    return ["--cookies-from-browser", browser]
+
 
 def fetch_info(url: str, browser: str = "") -> dict:
     """
@@ -242,8 +297,7 @@ def fetch_info(url: str, browser: str = "") -> dict:
     deno = deno_path()
     if deno:
         args += ["--js-runtimes", f"deno:{deno}"]
-    if browser and browser != "None":
-        args += ["--cookies-from-browser", browser]
+    args += _cookie_args(browser)
     args.append(url)
 
     try:
@@ -377,9 +431,11 @@ def _video_rank(f, bucket):
         codec = {"avc": 4, "vp9": 3, "av1": 2, "hevc": 1}.get(_family(f), 0)
     else:
         codec = {"vp9": 4, "av1": 3, "hevc": 2, "avc": 1}.get(_family(f), 0)
-    combined = 1 if (_has_audio(f) and _ac(f) != "unknown") else 0
+    # A single file that already contains the sound (e.g. X/Twitter "http-..." files) is the most reliable
+    # choice and needs no merging. Unknown audio info counts as "has sound".
+    combined = 1 if _ac(f) != "none" else 0
     bitrate = _num(f.get("tbr")) or _num(f.get("vbr"))
-    return (1 if sdr else 0, smooth, codec, combined, bitrate)
+    return (1 if sdr else 0, smooth, combined, codec, bitrate)
 
 
 def _pick_audio(audios, video):
@@ -471,15 +527,23 @@ FALLBACK_SORT = "res,fps,+hdr,vcodec:h264,acodec:aac"
 
 
 def build_args(url, folder, name="", quality="Best available", playlist=False,
-               browser="", ffmpeg_location=None, fmt=None, js_runtime=None):
-    """Everything after the yt-dlp program name."""
+               browser="", ffmpeg_location=None, fmt=None, js_runtime=None,
+               sort=True, simple=False, impersonate=False):
+    """
+    Everything after the yt-dlp program name.
+      fmt         exact streams chosen by the app (falls back to the usual best if they fail)
+      sort        use the app's own ranking for the fallback choice
+      simple      only single-file formats (the most compatible way; used for retries)
+      impersonate pretend to be a normal browser (helps with sites that block downloaders)
+    """
     args = [
-        "--newline", "--progress", "--no-warnings", "--windows-filenames",
+        "--newline", "--progress", "--windows-filenames",
         "--trim-filenames", "150",
         "--progress-template",
         "download:[PROG]%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
         "--progress-template", "postprocess:[POST]%(progress.postprocessor)s",
         "--print", "after_move:[FILE]%(filepath)s",
+        "--print", "after_move:[RES]%(width)s|%(height)s",
         "-P", str(folder),
     ]
 
@@ -487,34 +551,36 @@ def build_args(url, folder, name="", quality="Best available", playlist=False,
         args += ["--ffmpeg-location", ffmpeg_location]
     if js_runtime:
         args += ["--js-runtimes", f"deno:{js_runtime}"]
+    if impersonate:
+        args += ["--impersonate", "chrome"]
 
-    # output name
+    # output name (X/Twitter titles are the whole tweet text: keep them short and add the tweet id)
+    default_name = "%(title).90s [%(id)s]" if detect_platform(url) == "Twitter / X" else "%(title)s"
     if playlist:
         args += ["--yes-playlist", "-o",
                  "%(playlist_title|Videos)s/%(playlist_index&{} - |)s%(title)s.%(ext)s"]
     else:
         safe = clean_filename(name).replace("%", "%%")
-        args += ["--no-playlist", "-o", (safe if safe else "%(title)s") + ".%(ext)s"]
+        args += ["--no-playlist", "-o", (safe if safe else default_name) + ".%(ext)s"]
 
     # quality
+    m = re.match(r"(\d+)p", quality)
+    cap = m.group(1) if m else None
     if quality.startswith("Audio"):
-        args += ["-f", "bestaudio/best", "-x", "--audio-format", "mp3",
+        args += ["-f", "b" if simple else "bestaudio/best", "-x", "--audio-format", "mp3",
                  "--audio-quality", f"{MP3_KBPS}K"]
+    elif simple or not ffmpeg_location:
+        args += ["-f", (f"b[height<={cap}]/b" if cap else "b") + "/best"]
     else:
-        m = re.match(r"(\d+)p", quality)
-        if ffmpeg_location:
-            cap = m.group(1) if m else None
-            fallback = f"bv*[height<={cap}]+ba/b[height<={cap}]/b" if cap else "bv*+ba/b"
-            chosen = f"{fmt}/{fallback}" if fmt else fallback
-            # mp4 when the streams allow it (H.264/AAC), otherwise mkv (VP9/Opus keep full quality)
-            args += ["-f", chosen, "-S", FALLBACK_SORT, "--merge-output-format", "mp4/mkv"]
-        else:  # no ffmpeg: single-file formats only
-            single = f"b[height<={m.group(1)}]/b" if m else "b"
-            args += ["-f", single]
+        fallback = f"bv*[height<={cap}]+ba/b[height<={cap}]/b" if cap else "bv*+ba/b"
+        chosen = f"{fmt}/{fallback}" if fmt else fallback
+        args += ["-f", chosen]
+        if sort:
+            args += ["-S", FALLBACK_SORT]
+        # mp4 when the streams allow it (H.264/AAC), otherwise mkv (VP9/Opus keep full quality)
+        args += ["--merge-output-format", "mp4/mkv"]
 
-    if browser and browser != "None":
-        args += ["--cookies-from-browser", browser]
-
+    args += _cookie_args(browser)
     args.append(url)
     return args
 
@@ -717,7 +783,12 @@ class Result:
         self.ok = False
         self.cancelled = False
         self.files = []
-        self.error = ""
+        self.error = ""          # plain-language message
+        self.raw = ""            # yt-dlp's own message (for "Copy error")
+        self.kind = ""           # category, see error_kind()
+        self.log = []            # last lines of yt-dlp output, all attempts
+        self.attempts = 0
+        self.resolution = ""     # e.g. "1280x720"
 
 
 class Job:
@@ -732,15 +803,9 @@ class Job:
         if self.proc and self.proc.poll() is None:
             kill_tree(self.proc.pid)
 
-    def run(self, url, opts, on_progress=None, on_status=None) -> Result:
+    # ---- one attempt -------------------------------------------------
+    def _run_once(self, base, url, opts, variant, on_progress, on_status) -> Result:
         res = Result()
-        if self.cancelled:
-            res.cancelled = True
-            return res
-        base = ytdlp_command()
-        if not base:
-            res.error = "The downloader engine (yt-dlp) was not found. Please reinstall the app."
-            return res
 
         # Audio extraction deletes its source file afterwards. Work inside a private temp
         # folder so a video you already saved with the same name can never be touched.
@@ -750,6 +815,7 @@ class Job:
         if opts.get("quality", "").startswith("Audio"):
             tmp_dir = final_folder / (".vd_tmp_" + uuid.uuid4().hex[:8])
             run_opts["folder"] = str(tmp_dir)
+        run_opts.update({k: v for k, v in variant.items() if k not in ("label", "only_if")})
 
         args = build_args(url, ffmpeg_location=ffmpeg_dir(), js_runtime=deno_path(), **run_opts)
         errors = []
@@ -776,16 +842,28 @@ class Job:
                         last_pct = pct
                         if on_progress:
                             on_progress(pct, speed, eta, part)
-                elif line.startswith("[POST]"):
+                    continue
+                if line.startswith("[POST]"):
                     if on_status:
                         on_status("Processing file...")
                 elif line.startswith("[FILE]"):
                     res.files.append(line[6:])
-                elif line.startswith("ERROR:"):
-                    errors.append(line[6:].strip())
+                elif line.startswith("[RES]"):
+                    w, _, h = line[5:].partition("|")
+                    if w.strip().isdigit() and h.strip().isdigit():
+                        res.resolution = f"{w.strip()}x{h.strip()}"
+                elif line:
+                    res.log.append(line[:300])
+                    if line.startswith("ERROR:"):
+                        errors.append(line[6:].strip())
+                    elif line.startswith("yt-dlp: error:"):
+                        errors.append(line[14:].strip())
+                    elif re.match(r"^yt_dlp\.utils\.\w+: ", line):
+                        errors.append(line.split(": ", 1)[1].strip())
             code = self.proc.wait()
         except OSError as e:
-            res.error = f"Could not start the downloader: {e}"
+            res.raw = res.error = f"Could not start the downloader: {e}"
+            res.kind = "other"
             if tmp_dir:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             return res
@@ -795,10 +873,67 @@ class Job:
                 res.files = _move_out_of_temp(res.files, tmp_dir, final_folder)
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+        res.log = res.log[-40:]
         res.cancelled = self.cancelled
         res.ok = (code == 0) and not self.cancelled
         if not res.ok and not res.cancelled:
-            res.error = friendly_error(
-                errors[-1] if errors else f"The downloader stopped unexpectedly (code {code})."
-            )
+            last_line = res.log[-1] if res.log else ""
+            res.raw = errors[-1] if errors else (last_line or f"The downloader stopped unexpectedly (code {code}).")
+            res.kind = error_kind(res.raw)
+            res.error = friendly_error(res.raw)
         return res
+
+    # ---- the ways we try, in order ------------------------------------
+    @staticmethod
+    def _variants(opts):
+        steps = [{"label": "as chosen"}]
+        if opts.get("quality", "").startswith("Audio"):
+            steps.append({"label": "audio from the whole file", "fmt": None, "simple": True})
+        else:
+            steps.append({"label": "yt-dlp's own pick", "fmt": None, "sort": False})
+            steps.append({"label": "single file", "fmt": None, "simple": True})
+            steps.append({"label": "browser impersonation", "fmt": None, "simple": True, "impersonate": True,
+                          "only_if": ("403", "forbidden", "cloudflare", "impersonat")})
+        return steps
+
+    def run(self, url, opts, on_progress=None, on_status=None) -> Result:
+        if self.cancelled:
+            res = Result()
+            res.cancelled = True
+            return res
+        base = ytdlp_command()
+        if not base:
+            res = Result()
+            res.raw = res.error = "The downloader engine (yt-dlp) was not found. Please reinstall the app."
+            res.kind = "other"
+            return res
+
+        log, seen_errors, last, previous, tried = [], "", None, None, 0
+        for variant in self._variants(opts):
+            if self.cancelled:
+                break
+            only_if = variant.get("only_if")
+            if only_if and not any(h in seen_errors.lower() for h in only_if):
+                continue
+            if tried and on_status:
+                on_status("Trying another way...")
+            tried += 1
+            last = self._run_once(base, url, opts, variant, on_progress, on_status)
+            log += [f"--- attempt {tried}: {variant['label']} ---"] + last.log
+            if last.ok or last.cancelled:
+                break
+            if variant.get("impersonate") and "impersonat" in last.raw.lower():
+                last = previous             # this build of yt-dlp can't impersonate: keep the real error
+                break
+            seen_errors += " " + last.raw
+            previous = last
+            if last.kind not in RETRYABLE_KINDS:
+                break                       # login / private / removed ... retrying can't help
+
+        if last is None:                    # cancelled before the first attempt
+            last = Result()
+            last.cancelled = True
+        last.log = log[-80:]
+        last.attempts = tried
+        last.cancelled = last.cancelled or self.cancelled
+        return last

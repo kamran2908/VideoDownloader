@@ -66,6 +66,13 @@ What it needs from you:
 - Settings, the download history (`history.json`) and the theme are saved in the same folder.
 - Pasting a link runs a quick lookup (`yt-dlp --dump-single-json`) to get the title, thumbnail and every available quality.
 - The app chooses the exact video + audio streams itself: highest resolution, 60 fps preferred, HDR avoided (it looks washed out on normal screens), H.264 + AAC up to 1080p (plays everywhere), VP9 + Opus above that. Those same streams are what the size list shows, so the sizes match what gets downloaded.
+- If a download fails, `Job.run` (core.py) automatically retries in other ways: the app's own streams, then yt-dlp's own pick,
+  then plain single files, then browser impersonation (only after a 403). It stops early when retrying can't help
+  (login needed, private, removed...). Errors are sorted into types (`error_kind`) and explained in plain language.
+  **Copy error** on a failed card copies the exact yt-dlp message, the tried steps and the versions, ready to paste to you.
+- For X/Twitter the app prefers the plain single-file `http-...` videos (no merging needed) and still uses a 1080p HLS stream when X offers one.
+  File names are `title [id]` with the title cut to 90 characters.
+- Login-only content: Browser login supports Firefox/Edge/Chrome/Brave, or a `cookies.txt` file (works when Chrome's login can't be read).
 - Files are `.mp4` when the streams allow it, otherwise `.mkv` (for example 4K VP9/Opus). VLC plays both.
 - YouTube needs a JavaScript runtime for full quality. The installer bundles **Deno** in `bin\deno.exe` and yt-dlp is told where it is.
 - Downloads run one at a time. MP3 downloads work in a private temp folder, so they can never delete a video you already saved.

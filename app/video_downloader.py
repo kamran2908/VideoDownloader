@@ -91,6 +91,10 @@ class Item:
         self.text = self.wait_text
         self.job = None
         self.files = []
+        self.raw = ""                 # yt-dlp's own error text
+        self.kind = ""
+        self.log = []                 # last lines of yt-dlp output
+        self.attempts = 0
         self.w = None                 # widgets, filled in when the card is built
 
 
@@ -135,8 +139,12 @@ class App(ctk.CTk):
         self._default_quality_options(saved_quality)
         self.platform_var = ctk.StringVar(value=core.PLATFORMS[0])
         self.folder_var = ctk.StringVar(value=settings.get("folder", str(Path.home() / "Downloads")))
-        self.browser_var = ctk.StringVar(
-            value=settings.get("browser") if settings.get("browser") in core.BROWSERS else core.BROWSERS[0])
+        self.cookies_path = settings.get("cookies_path", "")
+        self.engine_version = ""
+        saved_browser = settings.get("browser") if settings.get("browser") in core.BROWSERS else core.BROWSERS[0]
+        if saved_browser == core.COOKIES_FILE_LABEL and not (self.cookies_path and Path(self.cookies_path).exists()):
+            saved_browser = core.BROWSERS[0]
+        self.browser_var = ctk.StringVar(value=saved_browser)
         self.playlist_var = ctk.BooleanVar(value=False)
         self.theme_var = ctk.StringVar(value=theme)
         self.status_var = ctk.StringVar(value="Checking for updates...")
@@ -270,7 +278,8 @@ class App(ctk.CTk):
         ctk.CTkLabel(two, text="Browser login (if asked)", anchor="w", text_color=("gray35", "gray65")).grid(
             row=0, column=1, sticky="w", padx=(8, 0))
         ctk.CTkOptionMenu(two, variable=self.platform_var, values=core.PLATFORMS).grid(row=1, column=0, sticky="ew")
-        ctk.CTkOptionMenu(two, variable=self.browser_var, values=core.BROWSERS).grid(
+        ctk.CTkOptionMenu(two, variable=self.browser_var, values=core.BROWSERS,
+                          command=self._on_browser_change).grid(
             row=1, column=1, sticky="ew", padx=(8, 0))
 
         ctk.CTkButton(left_outer, text="Add to queue", height=42, font=ctk.CTkFont(size=14, weight="bold"),
@@ -405,6 +414,31 @@ class App(ctk.CTk):
         settings["theme"] = mode
         core.save_settings(settings)
 
+    # ================================================================ browser login / cookies file
+
+    def _browser_value(self):
+        """What core should use: '' (nothing), a browser name, or 'file:<path to cookies.txt>'."""
+        v = self.browser_var.get()
+        if v == core.COOKIES_FILE_LABEL:
+            return ("file:" + self.cookies_path) if (self.cookies_path and Path(self.cookies_path).exists()) else ""
+        return "" if v == "None" else v
+
+    def _on_browser_change(self, value):
+        if value == core.COOKIES_FILE_LABEL:
+            path = filedialog.askopenfilename(title="Choose your cookies.txt file",
+                                              filetypes=[("Cookies file", "*.txt"), ("All files", "*.*")])
+            if path:
+                self.cookies_path = path
+            elif not self.cookies_path:
+                self.browser_var.set("None")
+        settings = core.load_settings()
+        settings.update({"browser": self.browser_var.get(), "cookies_path": self.cookies_path})
+        core.save_settings(settings)
+        # a different login can change what the preview is allowed to see: look the link up again
+        self.preview_url = ""
+        if core.extract_urls(self.url_var.get()):
+            self._on_url_change()
+
     # ================================================================ quality list (with sizes)
 
     def _apply_quality_options(self, options, select_key, show_sizes):
@@ -467,7 +501,7 @@ class App(ctk.CTk):
         self.preview_title.configure(text="")
         self.preview_meta.configure(text="")
         self._default_quality_options()
-        browser = self.browser_var.get()
+        browser = self._browser_value()
 
         def work():
             info = core.fetch_info(url, browser)
@@ -539,9 +573,10 @@ class App(ctk.CTk):
         q = self.current_quality()
         use_plan = (self.plan_url == url) and not playlist     # sizes/streams belong to this exact link
         opts = dict(folder=str(folder), name=name, quality=q["key"], playlist=playlist,
-                    browser=self.browser_var.get(), fmt=q["fmt"] if use_plan else None)
+                    browser=self._browser_value(), fmt=q["fmt"] if use_plan else None)
         settings = core.load_settings()
-        settings.update({"folder": str(folder), "quality": opts["quality"], "browser": opts["browser"]})
+        settings.update({"folder": str(folder), "quality": opts["quality"],
+                         "browser": self.browser_var.get(), "cookies_path": self.cookies_path})
         core.save_settings(settings)
 
         info = self.preview_info if (self.preview_url == url and self.preview_info
@@ -584,8 +619,10 @@ class App(ctk.CTk):
         a = ctk.CTkButton(btns, text="Cancel", width=92, command=lambda i=item: self._action_a(i))
         b = ctk.CTkButton(btns, text="Remove", width=92, fg_color="transparent", border_width=1,
                           text_color=("gray10", "gray90"), command=lambda i=item: self._remove(i))
+        c = ctk.CTkButton(btns, text="Copy error", width=92, fg_color="transparent", border_width=1,
+                          text_color=("gray10", "gray90"), command=lambda i=item: self._copy_error(i))
         a.grid(row=0, column=0, pady=(0, 6))
-        item.w = dict(card=card, img=img, thumb=thumb, title=title, status=status, bar=bar, a=a, b=b)
+        item.w = dict(card=card, img=img, thumb=thumb, title=title, status=status, bar=bar, a=a, b=b, c=c)
         card.grid(row=len(self.items), column=0, sticky="ew", padx=2, pady=4)
         self._refresh_item(item)
 
@@ -601,12 +638,18 @@ class App(ctk.CTk):
         if st in ("Queued", "Downloading"):
             w["a"].configure(text="Cancel")
             w["b"].grid_remove()
+            w["c"].grid_remove()
         elif st == "Done":
             w["a"].configure(text="Show file")
-            w["b"].grid(row=1, column=0)
+            w["b"].grid(row=1, column=0, pady=(0, 6))
+            w["c"].grid_remove()
         else:
             w["a"].configure(text="Retry")
-            w["b"].grid(row=1, column=0)
+            w["b"].grid(row=1, column=0, pady=(0, 6))
+            if st == "Failed":
+                w["c"].grid(row=2, column=0)
+            else:
+                w["c"].grid_remove()
 
     def _action_a(self, item):
         if item.status in ("Queued", "Downloading"):
@@ -617,11 +660,42 @@ class App(ctk.CTk):
             else:
                 reveal_file(Path(item.opts["folder"]) / "x")
         else:                                              # Failed / Cancelled -> try again
+            item.opts["browser"] = self._browser_value()   # pick up a login chosen after the failure
             with self.lock:
                 item.status, item.pct, item.text = "Queued", 0.0, item.wait_text
             self._refresh_item(item)
             self._ensure_runner()
             self._update_summary()
+
+    def _error_details(self, item):
+        browser = item.opts.get("browser") or "none"
+        if browser.startswith("file:"):
+            browser = "cookies.txt file"
+        lines = [
+            f"Video Downloader {core.APP_VERSION}   yt-dlp {self.engine_version or '?'}   {sys.platform}",
+            f"Link: {item.url}",
+            f"Quality: {item.opts.get('quality')}   streams: {item.opts.get('fmt')}   login: {browser}",
+            f"Tried {item.attempts} way(s).   Problem type: {item.kind}",
+            f"Error: {item.raw}",
+            "",
+            "--- yt-dlp output (last lines) ---",
+        ] + list(item.log)
+        return "\n".join(lines)
+
+    def _copy_error(self, item):
+        self.clipboard_clear()
+        self.clipboard_append(self._error_details(item))
+        self.update()
+        btn = item.w["c"] if item.w else None
+        if btn is not None:
+            btn.configure(text="Copied ✓")
+
+            def back():
+                try:
+                    btn.configure(text="Copy error")
+                except Exception:
+                    pass
+            self.after(1800, back)
 
     def _cancel(self, item):
         with self.lock:
@@ -714,7 +788,7 @@ class App(ctk.CTk):
 
         def on_status(text):
             item.text = text
-            item.pct = 100.0
+            item.pct = 100.0 if text.startswith("Processing") else 0.0
             self.msgs.put(("refresh", item.id))
 
         res = job.run(item.url, item.opts, on_progress, on_status)
@@ -726,10 +800,14 @@ class App(ctk.CTk):
             elif res.ok:
                 item.status, item.pct = "Done", 100.0
                 item.files = list(res.files)
-                item.text = "Done · " + (Path(res.files[-1]).name if res.files else "saved")
+                name = Path(res.files[-1]).name if res.files else "saved"
+                item.text = "Done · " + (res.resolution + " · " if res.resolution else "") + name
             else:
                 item.status, item.pct = "Failed", 0.0
                 item.text = res.error or "Download failed."
+                if res.kind == "other":
+                    item.text += "  (Press “Copy error” for details.)"
+            item.raw, item.kind, item.log, item.attempts = res.raw, res.kind, list(res.log), res.attempts
 
         if item.status == "Done":
             if item.title == item.url and item.files:
@@ -906,6 +984,7 @@ class App(ctk.CTk):
                     self._update_failed(rest[0])
                 elif kind == "engine":
                     version, note = rest
+                    self.engine_version = version
                     self.engine_var.set(f"App {core.APP_VERSION}   ·   yt-dlp {version}")
                     self.update_btn.configure(state="normal")
                     self._update_summary()

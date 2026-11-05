@@ -21,6 +21,14 @@ You can keep adding more links. Videos download **one at a time, in order**, and
   If a .mkv doesn't play, open it with the free **VLC** player.
 - Sizes are estimates (marked with ~). The real file can differ a little.
 
+## Videos from X (Twitter)
+- Paste the link of the post itself (`x.com/name/status/...`). If the video is in a quoted post or a reply, use that post's link.
+- Files are named like `Name - post text [id].mp4`, so two posts never overwrite each other.
+- The app picks the sharpest version X offers. After a download the card shows the real size, for example
+  `Done · 1280x720 · ...`. X itself stores most videos at 720p (some at 1080p), so that is the top quality available.
+  The app can't add detail that isn't in the original.
+- If one way of downloading fails, the app automatically tries other ways before it gives up.
+
 ## The Queue
 - **Cancel** stops a video. **Retry** tries again if something failed.
 - **Show file** opens the folder with the finished video selected.
@@ -39,7 +47,13 @@ Use the **System / Light / Dark** switch in the top right corner.
 
 ## If something goes wrong
 - **Update downloader** (bottom right): updates the hidden download engine, not the app. Press it first when a download that used to work fails. YouTube and X change often and this fixes most problems. The app also does it by itself every time it starts.
-- **"Needs you to be signed in" / age-restricted:** sign in to the site in your browser, then choose that browser under **Browser login** and try again. Close the browser if it still fails.
+- **"Needs you to be signed in" (age-restricted or sensitive posts, some Instagram or Facebook videos):**
+  sign in to the site in **Firefox**, then choose **firefox** under **Browser login** and press **Retry** on the card.
+  Chrome and Edge often can't share their login with other programs, so Firefox works best.
+  Another way: pick **cookies.txt file...** under Browser login and choose a cookies file exported from your browser
+  (for example with the free "Get cookies.txt LOCALLY" extension). Treat that file like a password.
+- **Anything else that fails:** press **Copy error** on the card and send the text to the person who made the app.
+  It contains the exact reason and the version numbers they need.
 - **"Couldn't reach the site":** check your internet connection.
 - **Video not available:** it may be private, removed or blocked in your country.
 
