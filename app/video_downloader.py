@@ -15,6 +15,7 @@ import threading
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -107,6 +108,10 @@ class App(ctk.CTk):
         ctk.set_appearance_mode(theme)
         ctk.set_default_color_theme("blue")
         super().__init__()
+        # CustomTkinter hides the whole window for a moment on every theme change (to repaint the title bar),
+        # which shows whatever is behind the app. Switch that off and recolour the title bar ourselves.
+        self._deactivate_windows_window_header_manipulation = True
+        self._titlebar_ready = True
 
         self.title("Video Downloader")
         self.geometry(f"1060x{min(820, max(self.winfo_screenheight() - 90, 640))}")
@@ -405,14 +410,78 @@ class App(ctk.CTk):
         if folder:
             self.folder_var.set(folder)
 
+    @staticmethod
+    def _is_dark_after(mode):
+        """Will the app be dark once 'mode' (System / Light / Dark) is applied?"""
+        if mode == "Dark":
+            return True
+        if mode == "Light":
+            return False
+        try:
+            import darkdetect
+            return bool(darkdetect.isDark())
+        except Exception:
+            return ctk.get_appearance_mode() == "Dark"
+
     def change_theme(self, mode):
+        """
+        Switch theme without the flicker: cover the window with the new background colour while the
+        widgets repaint, then remove the cover. (The window itself is never hidden.)
+        """
+        cover = None
+        try:
+            colours = ctk.ThemeManager.theme["CTk"]["fg_color"]
+            colour = colours[1 if self._is_dark_after(mode) else 0]
+            cover = tk.Frame(self, bg=colour, highlightthickness=0, bd=0)
+            cover.place(x=0, y=0, relwidth=1, relheight=1)
+            cover.lift()
+            self.update_idletasks()
+        except Exception:
+            cover = None
+
         ctk.set_appearance_mode(mode)
         self.after(80, self._make_empty_label)
         if self.tabs.get() == "History":
             self.after(80, self.refresh_history)
+
+        if cover is not None:
+            def remove_cover():
+                try:
+                    cover.destroy()
+                except Exception:
+                    pass
+            self.after(40, self.update_idletasks)
+            self.after(230, remove_cover)
+
         settings = core.load_settings()
         settings["theme"] = mode
         core.save_settings(settings)
+
+    def _set_appearance_mode(self, mode_string):
+        """Called by CustomTkinter whenever the theme changes (also when Windows itself switches)."""
+        super()._set_appearance_mode(mode_string)
+        if getattr(self, "_titlebar_ready", False):
+            self._apply_titlebar(mode_string)
+
+    def _apply_titlebar(self, mode_string):
+        """Make the Windows title bar light or dark WITHOUT hiding the window."""
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            import ctypes
+            dark = 1 if str(mode_string).lower() == "dark" else 0
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            value = ctypes.c_int(dark)
+            # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Windows 10 2004+ / 11), 19 = older Windows 10 builds
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)) != 0:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(value), ctypes.sizeof(value))
+            # ask Windows to repaint the title bar frame right away
+            # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+            # RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME
+            ctypes.windll.user32.RedrawWindow(hwnd, None, None, 0x0001 | 0x0100 | 0x0400)
+        except Exception:
+            pass
 
     # ================================================================ browser login / cookies file
 
