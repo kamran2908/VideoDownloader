@@ -23,6 +23,29 @@ from PIL import Image, ImageOps
 
 import core
 
+# ---------------------------------------------------------------------------------------------
+# Smooth theme switching.
+# CustomTkinter makes every widget repaint the screen right after it recolours itself, so on a theme
+# change the colours ripple through the window one widget after another. We let all widgets recolour
+# first (screen repainting paused) and the screen is then repainted once, all at the same moment.
+# ---------------------------------------------------------------------------------------------
+try:
+    from customtkinter.windows.widgets.appearance_mode.appearance_mode_tracker import AppearanceModeTracker as _Tracker
+
+    _original_update_callbacks = _Tracker.update_callbacks.__func__
+
+    def _atomic_update_callbacks(cls):
+        real_update_idletasks = tk.Misc.update_idletasks
+        tk.Misc.update_idletasks = lambda self: None
+        try:
+            _original_update_callbacks(cls)
+        finally:
+            tk.Misc.update_idletasks = real_update_idletasks
+
+    _Tracker.update_callbacks = classmethod(_atomic_update_callbacks)
+except Exception:          # a different CustomTkinter layout: fall back to the normal behaviour
+    pass
+
 NOTICE_TEXT = (
     "This app saves videos from sites like YouTube and X.\n\n"
     "Only download videos that you own, that are free to use, or that you have "
@@ -410,49 +433,12 @@ class App(ctk.CTk):
         if folder:
             self.folder_var.set(folder)
 
-    @staticmethod
-    def _is_dark_after(mode):
-        """Will the app be dark once 'mode' (System / Light / Dark) is applied?"""
-        if mode == "Dark":
-            return True
-        if mode == "Light":
-            return False
-        try:
-            import darkdetect
-            return bool(darkdetect.isDark())
-        except Exception:
-            return ctk.get_appearance_mode() == "Dark"
-
     def change_theme(self, mode):
-        """
-        Switch theme without the flicker: cover the window with the new background colour while the
-        widgets repaint, then remove the cover. (The window itself is never hidden.)
-        """
-        cover = None
-        try:
-            colours = ctk.ThemeManager.theme["CTk"]["fg_color"]
-            colour = colours[1 if self._is_dark_after(mode) else 0]
-            cover = tk.Frame(self, bg=colour, highlightthickness=0, bd=0)
-            cover.place(x=0, y=0, relwidth=1, relheight=1)
-            cover.lift()
-            self.update_idletasks()
-        except Exception:
-            cover = None
-
+        """Switch theme. All widgets recolour together and the screen repaints once (see top of file)."""
         ctk.set_appearance_mode(mode)
-        self.after(80, self._make_empty_label)
+        self._make_empty_label()               # its "transparent" background must be rebuilt for the new theme
         if self.tabs.get() == "History":
-            self.after(80, self.refresh_history)
-
-        if cover is not None:
-            def remove_cover():
-                try:
-                    cover.destroy()
-                except Exception:
-                    pass
-            self.after(40, self.update_idletasks)
-            self.after(230, remove_cover)
-
+            self.refresh_history()
         settings = core.load_settings()
         settings["theme"] = mode
         core.save_settings(settings)
@@ -478,8 +464,8 @@ class App(ctk.CTk):
             # ask Windows to repaint the title bar frame right away
             # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
-            # RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME
-            ctypes.windll.user32.RedrawWindow(hwnd, None, None, 0x0001 | 0x0100 | 0x0400)
+            # RDW_INVALIDATE | RDW_FRAME  (painted together with everything else, not separately)
+            ctypes.windll.user32.RedrawWindow(hwnd, None, None, 0x0001 | 0x0400)
         except Exception:
             pass
 
